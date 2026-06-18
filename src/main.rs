@@ -8,7 +8,6 @@ use anyhow::{Context as _, Result};
 use clap::{App, AppSettings, Arg};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UdpSocket, UnixListener};
-use turn::Error;
 use turn::auth::generate_long_term_credentials;
 use turn::auth::*;
 use turn::relay::relay_static::RelayAddressGeneratorStatic;
@@ -67,7 +66,7 @@ async fn socket_loop(path: &Path, shared_secret: &str) -> Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> Result<()> {
     env_logger::init();
 
     let mut app = App::new("TURN Server UDP")
@@ -92,6 +91,17 @@ async fn main() -> Result<(), Error> {
                 .takes_value(true)
                 .long("socket")
                 .help("Unix socket path"),
+        )
+        .arg(
+            Arg::with_name("external-ip")
+                .takes_value(true)
+                .long("external-ip")
+                .help(
+                    "Public IP address to advertise to clients in the relay \
+                     address (XOR-RELAYED-ADDRESS). Use when running behind NAT. \
+                     Only applied to listening addresses of the same family \
+                     (IPv4/IPv6). If unset, the interface IP is used.",
+                ),
         );
 
     let matches = app.clone().get_matches();
@@ -105,14 +115,29 @@ async fn main() -> Result<(), Error> {
     let realm = matches.value_of("realm").unwrap();
     let socket_path = Path::new(matches.value_of("socket").unwrap());
 
+    let external_ip: Option<IpAddr> = match matches.value_of("external-ip") {
+        Some(s) => Some(s.parse().context("invalid --external-ip value")?),
+        None => None,
+    };
+
     let mut conn_configs = Vec::new();
     for listen_ip in listen_ips() {
         println!("Listening on {listen_ip}");
         let conn = Arc::new(UdpSocket::bind((listen_ip, port)).await?);
+
+        // Only advertise the external IP for listening addresses of the same
+        // family, e.g. an IPv4 --external-ip must not be returned for IPv6
+        // sockets.
+        let relay_address = match external_ip {
+            Some(ip) if ip.is_ipv4() == listen_ip.is_ipv4() => ip,
+            _ => listen_ip,
+        };
+        println!("Advertising relay address {relay_address}");
+
         let conn_config = ConnConfig {
             conn,
             relay_addr_generator: Box::new(RelayAddressGeneratorStatic {
-                relay_address: listen_ip,
+                relay_address,
                 address: listen_ip.to_string(),
                 net: Arc::new(Net::new(None)),
             }),
