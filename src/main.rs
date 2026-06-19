@@ -40,27 +40,27 @@ fn is_link_local(ip: IpAddr) -> bool {
     }
 }
 
-/// Resolves the `--relayed-address` value to one or more IP addresses.
+/// Resolves the `--relay-address` value to one or more IP addresses.
 ///
 /// A literal IP address is used as-is. Otherwise the value is treated as a
 /// hostname and resolved via the system resolver at startup; it may resolve to
 /// both IPv4 and IPv6 addresses, and the matching family is later chosen per
 /// listening socket.
-async fn resolve_relayed_address(value: &str) -> Result<Vec<IpAddr>> {
+async fn resolve_relay_address(value: &str) -> Result<Vec<IpAddr>> {
     if let Ok(ip) = value.parse::<IpAddr>() {
         return Ok(vec![ip]);
     }
 
     let addresses: Vec<IpAddr> = lookup_host((value, 0u16))
         .await
-        .with_context(|| format!("failed to resolve --relayed-address {value:?}"))?
+        .with_context(|| format!("failed to resolve --relay-address {value:?}"))?
         .map(|addr| addr.ip())
         .collect();
 
     if addresses.is_empty() {
-        anyhow::bail!("--relayed-address {value:?} did not resolve to any address");
+        anyhow::bail!("--relay-address {value:?} did not resolve to any address");
     }
-    println!("Resolved relayed address {value} to {addresses:?}");
+    println!("Resolved relay address {value} to {addresses:?}");
     Ok(addresses)
 }
 
@@ -117,9 +117,9 @@ async fn main() -> Result<()> {
                 .help("Unix socket path"),
         )
         .arg(
-            Arg::with_name("relayed-address")
+            Arg::with_name("relay-address")
                 .takes_value(true)
-                .long("relayed-address")
+                .long("relay-address")
                 .help(
                     "Public IP address or hostname to advertise to clients in \
                      the relay address (XOR-RELAYED-ADDRESS). Use when running \
@@ -140,8 +140,8 @@ async fn main() -> Result<()> {
     let realm = matches.value_of("realm").unwrap();
     let socket_path = Path::new(matches.value_of("socket").unwrap());
 
-    let relayed_addresses: Vec<IpAddr> = match matches.value_of("relayed-address") {
-        Some(value) => resolve_relayed_address(value).await?,
+    let relay_addresses: Vec<IpAddr> = match matches.value_of("relay-address") {
+        Some(value) => resolve_relay_address(value).await?,
         None => Vec::new(),
     };
 
@@ -150,10 +150,10 @@ async fn main() -> Result<()> {
         println!("Listening on {listen_ip}");
         let conn = Arc::new(UdpSocket::bind((listen_ip, port)).await?);
 
-        // Only advertise a relayed address of the same family as the listening
-        // socket, e.g. an IPv4 --relayed-address must not be returned for IPv6
+        // Only advertise a relay address of the same family as the listening
+        // socket, e.g. an IPv4 --relay-address must not be returned for IPv6
         // sockets. Falls back to the interface IP when none is configured.
-        let relay_address = relayed_addresses
+        let relay_address = relay_addresses
             .iter()
             .copied()
             .find(|ip| ip.is_ipv4() == listen_ip.is_ipv4())
