@@ -93,9 +93,9 @@ async fn main() -> Result<()> {
                 .help("Unix socket path"),
         )
         .arg(
-            Arg::with_name("external-ip")
+            Arg::with_name("relayed-address")
                 .takes_value(true)
-                .long("external-ip")
+                .long("relayed-address")
                 .help(
                     "Public IP address to advertise to clients in the relay \
                      address (XOR-RELAYED-ADDRESS). Use when running behind NAT. \
@@ -115,8 +115,8 @@ async fn main() -> Result<()> {
     let realm = matches.value_of("realm").unwrap();
     let socket_path = Path::new(matches.value_of("socket").unwrap());
 
-    let external_ip: Option<IpAddr> = match matches.value_of("external-ip") {
-        Some(s) => Some(s.parse().context("invalid --external-ip value")?),
+    let relayed_address: Option<IpAddr> = match matches.value_of("relayed-address") {
+        Some(s) => Some(s.parse().context("invalid --relayed-address value")?),
         None => None,
     };
 
@@ -125,10 +125,10 @@ async fn main() -> Result<()> {
         println!("Listening on {listen_ip}");
         let conn = Arc::new(UdpSocket::bind((listen_ip, port)).await?);
 
-        // Only advertise the external IP for listening addresses of the same
-        // family, e.g. an IPv4 --external-ip must not be returned for IPv6
-        // sockets.
-        let relay_address = match external_ip {
+        // Only advertise the relayed address for listening addresses of the
+        // same family, e.g. an IPv4 --relayed-address must not be returned for
+        // IPv6 sockets.
+        let relay_address = match relayed_address {
             Some(ip) if ip.is_ipv4() == listen_ip.is_ipv4() => ip,
             _ => listen_ip,
         };
