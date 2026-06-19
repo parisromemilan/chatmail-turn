@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use clap::{App, AppSettings, Arg};
 use tokio::io::AsyncWriteExt;
-use tokio::net::{UdpSocket, UnixListener};
+use tokio::net::{UdpSocket, UnixListener, lookup_host};
 use turn::auth::generate_long_term_credentials;
 use turn::auth::*;
 use turn::relay::relay_static::RelayAddressGeneratorStatic;
@@ -38,6 +38,30 @@ fn is_link_local(ip: IpAddr) -> bool {
         IpAddr::V4(ipv4) => ipv4.is_link_local(),
         IpAddr::V6(ipv6) => ipv6.is_unicast_link_local(),
     }
+}
+
+/// Resolves the `--relayed-address` value to one or more IP addresses.
+///
+/// A literal IP address is used as-is. Otherwise the value is treated as a
+/// hostname and resolved via the system resolver at startup; it may resolve to
+/// both IPv4 and IPv6 addresses, and the matching family is later chosen per
+/// listening socket.
+async fn resolve_relayed_address(value: &str) -> Result<Vec<IpAddr>> {
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Ok(vec![ip]);
+    }
+
+    let addresses: Vec<IpAddr> = lookup_host((value, 0u16))
+        .await
+        .with_context(|| format!("failed to resolve --relayed-address {value:?}"))?
+        .map(|addr| addr.ip())
+        .collect();
+
+    if addresses.is_empty() {
+        anyhow::bail!("--relayed-address {value:?} did not resolve to any address");
+    }
+    println!("Resolved relayed address {value} to {addresses:?}");
+    Ok(addresses)
 }
 
 /// Listens on the Unix socket,
@@ -97,10 +121,11 @@ async fn main() -> Result<()> {
                 .takes_value(true)
                 .long("relayed-address")
                 .help(
-                    "Public IP address to advertise to clients in the relay \
-                     address (XOR-RELAYED-ADDRESS). Use when running behind NAT. \
-                     Only applied to listening addresses of the same family \
-                     (IPv4/IPv6). If unset, the interface IP is used.",
+                    "Public IP address or hostname to advertise to clients in \
+                     the relay address (XOR-RELAYED-ADDRESS). Use when running \
+                     behind NAT. A hostname is resolved at startup; only \
+                     addresses of the same family (IPv4/IPv6) as each listening \
+                     socket are used. If unset, the interface IP is used.",
                 ),
         );
 
@@ -115,9 +140,9 @@ async fn main() -> Result<()> {
     let realm = matches.value_of("realm").unwrap();
     let socket_path = Path::new(matches.value_of("socket").unwrap());
 
-    let relayed_address: Option<IpAddr> = match matches.value_of("relayed-address") {
-        Some(s) => Some(s.parse().context("invalid --relayed-address value")?),
-        None => None,
+    let relayed_addresses: Vec<IpAddr> = match matches.value_of("relayed-address") {
+        Some(value) => resolve_relayed_address(value).await?,
+        None => Vec::new(),
     };
 
     let mut conn_configs = Vec::new();
@@ -125,13 +150,14 @@ async fn main() -> Result<()> {
         println!("Listening on {listen_ip}");
         let conn = Arc::new(UdpSocket::bind((listen_ip, port)).await?);
 
-        // Only advertise the relayed address for listening addresses of the
-        // same family, e.g. an IPv4 --relayed-address must not be returned for
-        // IPv6 sockets.
-        let relay_address = match relayed_address {
-            Some(ip) if ip.is_ipv4() == listen_ip.is_ipv4() => ip,
-            _ => listen_ip,
-        };
+        // Only advertise a relayed address of the same family as the listening
+        // socket, e.g. an IPv4 --relayed-address must not be returned for IPv6
+        // sockets. Falls back to the interface IP when none is configured.
+        let relay_address = relayed_addresses
+            .iter()
+            .copied()
+            .find(|ip| ip.is_ipv4() == listen_ip.is_ipv4())
+            .unwrap_or(listen_ip);
         println!("Advertising relay address {relay_address}");
 
         let conn_config = ConnConfig {
